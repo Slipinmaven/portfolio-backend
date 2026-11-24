@@ -1,9 +1,10 @@
 import asyncio
 from uuid import UUID
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from app.application.media.dto import (
     MediaLinkInput,
@@ -85,6 +86,7 @@ async def get_media_storage_usage(
             }
             for media in summary.largest_files
         ],
+        storage_provider=summary.storage_provider,
         filesystem_total_bytes=summary.filesystem_total_bytes,
         filesystem_free_bytes=summary.filesystem_free_bytes,
         filesystem_free_percent=summary.filesystem_free_percent,
@@ -197,13 +199,9 @@ async def get_admin_video_poster(
     media_id: UUID,
     _editor: User = Depends(require_editor_or_admin),
     media_service: MediaService = Depends(get_media_service),
-) -> FileResponse:
-    path = await media_service.get_admin_video_poster(media_id)
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        headers={"X-Content-Type-Options": "nosniff"},
-    )
+) -> Response:
+    asset = await media_service.get_admin_video_poster(media_id)
+    return _poster_response(asset)
 
 
 @router.get("/admin/{media_id}/content")
@@ -211,9 +209,9 @@ async def get_admin_media_content(
     media_id: UUID,
     _editor: User = Depends(require_editor_or_admin),
     media_service: MediaService = Depends(get_media_service),
-) -> FileResponse:
-    media, path = await media_service.get_admin_stored_file(media_id)
-    return _media_file_response(media, path)
+) -> Response:
+    media, asset = await media_service.get_admin_stored_file(media_id)
+    return _media_file_response(media, asset)
 
 
 @router.get("/admin/{media_id}", response_model=MediaResponse)
@@ -269,31 +267,58 @@ async def delete_media(
 async def get_video_poster(
     media_id: UUID,
     media_service: MediaService = Depends(get_media_service),
-) -> FileResponse:
-    path = await media_service.get_public_video_poster(media_id)
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        headers={"X-Content-Type-Options": "nosniff"},
-    )
+) -> Response:
+    asset = await media_service.get_public_video_poster(media_id)
+    return _poster_response(asset)
 
 
 @router.get("/{media_id}/content")
 async def get_media_content(
     media_id: UUID,
     media_service: MediaService = Depends(get_media_service),
-) -> FileResponse:
-    media, path = await media_service.get_public_stored_file(media_id)
-    return _media_file_response(media, path)
+) -> Response:
+    media, asset = await media_service.get_public_stored_file(media_id)
+    return _media_file_response(media, asset)
 
 
-def _media_file_response(media: Media, path: Path) -> FileResponse:
+def _media_file_response(media: Media, asset: Path | str | bytes) -> Response:
+    if isinstance(asset, str):
+        return RedirectResponse(asset, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     is_document = media.kind == MediaKind.DOCUMENT
+    content_disposition_type = "attachment" if is_document else "inline"
+    if isinstance(asset, bytes):
+        return Response(
+            content=asset,
+            media_type=media.mime_type,
+            headers={
+                "Content-Disposition": (
+                    f"{content_disposition_type}; "
+                    f"filename*=UTF-8''{quote(media.original_filename)}"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     return FileResponse(
-        path,
+        asset,
         media_type=media.mime_type,
         filename=media.original_filename,
-        content_disposition_type="attachment" if is_document else "inline",
+        content_disposition_type=content_disposition_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _poster_response(asset: Path | str | bytes) -> Response:
+    if isinstance(asset, str):
+        return RedirectResponse(asset, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    if isinstance(asset, bytes):
+        return Response(
+            content=asset,
+            media_type="image/jpeg",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+    return FileResponse(
+        asset,
+        media_type="image/jpeg",
         headers={"X-Content-Type-Options": "nosniff"},
     )
 

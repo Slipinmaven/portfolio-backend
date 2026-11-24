@@ -27,7 +27,7 @@ from app.application.media.dto import (
 from app.application.media.service import MediaService
 from app.application.projects.media_dto import ProjectMediaCreateDTO
 from app.application.projects.media_service import ProjectMediaService
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.infrastructure.database.models.enums import (
     DevelopmentStatus,
     MediaKind,
@@ -45,10 +45,12 @@ from app.infrastructure.media_processing.processor import (
     ProcessedMedia,
 )
 from app.infrastructure.storage.local_media_storage import LocalMediaStorage
+from app.infrastructure.storage.supabase_media_storage import SupabaseMediaStorage
 from app.main import app
 from fastapi.testclient import TestClient
 from app.presentation.dependencies.auth import require_editor_or_admin
 from app.presentation.dependencies.services import get_media_service
+from app.presentation.api.v1.endpoints.media import _media_file_response
 
 
 class MediaProcessorTests(unittest.TestCase):
@@ -220,7 +222,81 @@ class MediaProcessorTests(unittest.TestCase):
         self.assertEqual(probe.stdout.strip(), "h264")
 
 
+class MediaResponseTests(unittest.TestCase):
+    def test_signed_supabase_media_uses_temporary_redirect(self) -> None:
+        media = Media(
+            id=uuid4(),
+            kind=MediaKind.IMAGE,
+            storage_key="2026/11/image.png",
+            original_filename="image.png",
+            mime_type="image/png",
+            size_bytes=5,
+            checksum_sha256="a" * 64,
+        )
+
+        response = _media_file_response(
+            media,
+            "https://project.supabase.co/storage/v1/object/sign/asset?token=short-lived",
+        )
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(
+            response.headers["location"],
+            "https://project.supabase.co/storage/v1/object/sign/asset?token=short-lived",
+        )
+
+    def test_admin_document_bytes_keep_attachment_disposition(self) -> None:
+        media = Media(
+            id=uuid4(),
+            kind=MediaKind.DOCUMENT,
+            storage_key="2026/11/report.pdf",
+            original_filename="final report.pdf",
+            mime_type="application/pdf",
+            size_bytes=5,
+            checksum_sha256="b" * 64,
+        )
+
+        response = _media_file_response(media, b"%PDF-")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, b"%PDF-")
+        self.assertEqual(response.media_type, "application/pdf")
+        self.assertIn(
+            "attachment; filename*=UTF-8''final%20report.pdf",
+            response.headers["content-disposition"],
+        )
+
+
 class MediaServiceUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supabase_summary_does_not_report_local_disk_quota(self) -> None:
+        unit_of_work = _media_unit_of_work()
+        unit_of_work.media.get_storage_usage_by_kind = AsyncMock(return_value=[])
+        unit_of_work.media.list_video_storage_keys = AsyncMock(return_value=[])
+        unit_of_work.media.list_largest_media = AsyncMock(return_value=[])
+        configuration = Settings(
+            _env_file=None,
+            database_url="postgresql+asyncpg://user:pass@localhost/db",
+            media_storage_provider="supabase",
+            supabase_url="https://project.supabase.co",
+            supabase_secret_key="server-only-test-key",
+        )
+        service = MediaService(
+            cast(MediaUnitOfWork, unit_of_work),
+            configuration,
+        )
+
+        with patch(
+            "app.application.media.service.shutil.disk_usage",
+            side_effect=AssertionError("Remote storage must not use local quota."),
+        ):
+            summary = await service.get_storage_summary()
+
+        self.assertEqual(summary.storage_provider, "supabase")
+        self.assertIsNone(summary.filesystem_total_bytes)
+        self.assertIsNone(summary.filesystem_free_bytes)
+        self.assertIsNone(summary.filesystem_free_percent)
+        self.assertFalse(summary.is_low_storage)
+
     async def test_storage_summary_includes_video_preview_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             media_root = Path(temporary_directory)
@@ -285,6 +361,7 @@ class MediaServiceUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.filesystem_free_percent, 5)
         self.assertEqual(summary.warning_threshold_free_percent, 10)
         self.assertTrue(summary.is_low_storage)
+        self.assertEqual(summary.storage_provider, "local")
 
     async def test_begin_upload_job_persists_processing_state(self) -> None:
         upload_id = uuid4()
@@ -553,6 +630,50 @@ class MediaServiceUploadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MediaDeliveryPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supabase_public_asset_is_signed_only_after_published_usage(self) -> None:
+        media = Media(
+            id=uuid4(),
+            kind=MediaKind.IMAGE,
+            storage_key="2026/11/image.png",
+            original_filename="image.png",
+            mime_type="image/png",
+            size_bytes=5,
+            checksum_sha256="a" * 64,
+        )
+        unit_of_work = _media_unit_of_work(media)
+        configuration = Settings(
+            _env_file=None,
+            database_url="postgresql+asyncpg://user:pass@localhost/db",
+            media_storage_provider="supabase",
+            supabase_url="https://project.supabase.co",
+            supabase_service_role_key="server-only-test-key",
+        )
+        service = MediaService(
+            cast(MediaUnitOfWork, unit_of_work),
+            configuration,
+        )
+
+        with patch.object(
+            SupabaseMediaStorage,
+            "create_signed_url",
+            return_value="https://project.supabase.co/signed",
+        ) as create_signed_url:
+            with self.assertRaises(ResourceNotFoundError):
+                await service.get_public_stored_file(media.id)
+            create_signed_url.assert_not_called()
+
+            unit_of_work.project_media.has_published_usage.return_value = True
+            returned_media, signed_url = await service.get_public_stored_file(
+                media.id
+            )
+
+        self.assertIs(returned_media, media)
+        self.assertEqual(signed_url, "https://project.supabase.co/signed")
+        create_signed_url.assert_called_once_with(
+            media.storage_key,
+            download_filename=None,
+        )
+
     async def test_public_content_and_posters_require_published_project_usage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -904,6 +1025,7 @@ class MediaRouteTests(unittest.TestCase):
                             size_bytes=120,
                         ),
                     ),
+                    storage_provider="local",
                     filesystem_total_bytes=1000,
                     filesystem_free_bytes=500,
                     filesystem_free_percent=50,

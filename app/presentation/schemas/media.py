@@ -112,9 +112,10 @@ class MediaStorageSummaryResponse(BaseModel):
     size_bytes: int = Field(ge=0)
     categories: list[MediaStorageCategoryResponse]
     largest_files: list[MediaStorageFileResponse]
-    filesystem_total_bytes: int = Field(ge=1)
-    filesystem_free_bytes: int = Field(ge=0)
-    filesystem_free_percent: float = Field(ge=0, le=100)
+    storage_provider: Literal["local", "supabase"]
+    filesystem_total_bytes: int | None = Field(default=None, ge=1)
+    filesystem_free_bytes: int | None = Field(default=None, ge=0)
+    filesystem_free_percent: float | None = Field(default=None, ge=0, le=100)
     warning_threshold_free_percent: int = Field(ge=1, le=99)
     is_low_storage: bool
 

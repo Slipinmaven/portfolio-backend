@@ -59,7 +59,13 @@ class LocalMediaStorage:
             logger.exception("Unable to stage uploaded media")
             raise MediaStorageError() from exc
 
-    def finalize(self, staged_path: Path, storage_key: str) -> Path:
+    def finalize(
+        self,
+        staged_path: Path,
+        storage_key: str,
+        *,
+        content_type: str | None = None,
+    ) -> Path:
         destination = self.resolve(storage_key)
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)

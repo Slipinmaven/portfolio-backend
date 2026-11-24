@@ -160,8 +160,33 @@ Database-dependent tests require a reachable PostgreSQL database.
 
 ## Media
 
-Local uploads default to `media/`. Set `MEDIA_DIRECTORY` to persistent
-storage in deployment and include it in backups.
+Local media storage remains the default. For durable object storage, create a
+**private** Supabase Storage bucket named `portfolio-media`, then configure
+these variables in the backend environment (for example, Render) and in
+`backend/.env` when testing locally:
+
+```dotenv
+MEDIA_STORAGE_PROVIDER=supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SECRET_KEY=<server-only-secret-key>
+SUPABASE_MEDIA_BUCKET=portfolio-media
+```
+
+Keep the Supabase secret key only in the backend environment; never put it in
+the frontend or commit it. The older `SUPABASE_SERVICE_ROLE_KEY` is accepted
+for compatibility, but new setups should use `SUPABASE_SECRET_KEY`. The backend
+uploads objects and creates short-lived signed URLs after checking public media
+usage. Admin previews are served through the authenticated backend. The bucket
+must remain private.
+
+Uploads are still staged under `MEDIA_DIRECTORY` for validation and video
+processing, so the backend needs writable temporary disk space. When using
+Supabase, the media-library disk-space indicator is hidden; check object
+storage quota and actual usage in the Supabase dashboard. The Supabase Free
+file limit is 50 MB, matching the backend's current video upload maximum.
+
+With local storage, uploads default to `media/`. Set `MEDIA_DIRECTORY` to
+persistent storage in deployment and include it in backups.
 
 Video uploads require FFmpeg and FFprobe. The backend generates MP4 previews
 and JPEG posters, persists processing jobs, and prevents deletion of
@@ -184,7 +209,8 @@ This repository does not currently include a container or platform-specific
 deployment manifest. A typical host needs:
 
 1. PostgreSQL 15 or newer.
-2. A persistent volume for `MEDIA_DIRECTORY`.
+2. Writable disk space for `MEDIA_DIRECTORY`; a persistent volume is required
+   only when using `MEDIA_STORAGE_PROVIDER=local`.
 3. FFmpeg and FFprobe when video uploads are enabled.
 4. Environment variables rather than a committed `.env`.
 5. HTTPS and exact production frontend origins in `CORS_ORIGINS`.

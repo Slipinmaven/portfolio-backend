@@ -2,8 +2,9 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -26,6 +27,11 @@ class Settings(BaseSettings):
     debug: bool = False
     timezone: str = "UTC"
     media_directory: Path = BACKEND_DIR / "media"
+    media_storage_provider: Literal["local", "supabase"] = "local"
+    supabase_url: str | None = None
+    supabase_secret_key: SecretStr = SecretStr("")
+    supabase_service_role_key: SecretStr = SecretStr("")
+    supabase_media_bucket: str = "portfolio-media"
     media_storage_warning_free_percent: int = Field(default=10, ge=1, le=99)
     media_image_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     media_document_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
@@ -76,6 +82,37 @@ class Settings(BaseSettings):
         if not value.get_secret_value().startswith("postgresql+asyncpg://"):
             raise ValueError("DATABASE_URL must use the postgresql+asyncpg driver")
         return value
+
+    @model_validator(mode="after")
+    def validate_media_storage_configuration(self) -> "Settings":
+        if self.media_storage_provider != "supabase":
+            return self
+        if (
+            not self.supabase_url
+            or not (
+                self.supabase_secret_key.get_secret_value().strip()
+                or self.supabase_service_role_key.get_secret_value().strip()
+            )
+        ):
+            raise ValueError(
+                "SUPABASE_URL and SUPABASE_SECRET_KEY (or the legacy "
+                "SUPABASE_SERVICE_ROLE_KEY) are required "
+                "when MEDIA_STORAGE_PROVIDER=supabase"
+            )
+        parsed_url = urlsplit(self.supabase_url)
+        if (
+            parsed_url.scheme != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.path not in ("", "/")
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("SUPABASE_URL must be an HTTPS project URL.")
+        if not self.supabase_media_bucket or "/" in self.supabase_media_bucket:
+            raise ValueError("SUPABASE_MEDIA_BUCKET must be a bucket name.")
+        return self
 
     @field_validator("media_directory", mode="before")
     @classmethod
