@@ -4,6 +4,9 @@ FastAPI backend for the portfolio platform. It provides authentication,
 role-based content management, PostgreSQL persistence, Alembic migrations,
 revision-aware page publishing, media processing, and public portfolio APIs.
 
+The companion Next.js frontend is maintained in the
+[portfolio-web repository](https://github.com/Slipinmaven/portfolio-web).
+
 ## Stack
 
 - Python 3.12+
